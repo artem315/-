@@ -24,7 +24,7 @@ jobs:
       - name: Unzip project
         run: |
           mkdir project
-          unzip -q archive.zip-d project
+          unzip -q archive.zip -d project
           echo "=== ZIP CONTENTS ==="
           find project -maxdepth 3 -type f
 
