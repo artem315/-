@@ -4,5 +4,8 @@
   "private": true,
   "main": "bot.js",
   "scripts": { "start": "node bot.js" },
-  "dependencies": { "mineflayer": "^4.33.0" }
+  "dependencies": {
+    "mineflayer": "^4.33.0",
+    "mineflayer-pathfinder": "^2.4.5"
+  }
 }
