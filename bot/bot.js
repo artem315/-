@@ -24,37 +24,68 @@ try { if (!groqKey) groqKey = fs.readFileSync(KEY_FILE, 'utf8').trim() } catch (
 const aiHistory = []
 let aiBusy = false
 
+const GROQ_URL = 'https://api.groq.com/openai/v1'
+// модели в порядке предпочтения; если ни одной нет, берём любую чатовую
+const PREFERRED_MODELS = ['llama-3.3-70b', 'llama-4', 'gpt-oss-120b', 'kimi', 'qwen', 'gpt-oss-20b', 'llama-3.1-8b']
+let groqModel = GROQ_MODEL
+
+async function pickModel () {
+  const res = await fetch(`${GROQ_URL}/models`, { headers: { Authorization: `Bearer ${groqKey}` } })
+  if (!res.ok) throw Object.assign(new Error(`Groq ${res.status}`), { status: res.status })
+  const ids = ((await res.json()).data || [])
+    .filter((m) => m.active !== false)
+    .map((m) => m.id)
+    .filter((id) => !/whisper|tts|guard|embed|orpheus|playai|distil/i.test(id))
+  const found = PREFERRED_MODELS.map((p) => ids.find((id) => id.includes(p))).find(Boolean) || ids[0]
+  if (!found) throw new Error('нет доступных моделей')
+  console.log('Groq: выбрана модель', found)
+  groqModel = found
+}
+
+async function groqChat (messages) {
+  return fetch(`${GROQ_URL}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${groqKey}` },
+    body: JSON.stringify({ model: groqModel, messages, temperature: 0.6, max_tokens: 300 })
+  })
+}
+
+function parseReply (content) {
+  const m = content.match(/\{[\s\S]*\}/)
+  if (m) {
+    try {
+      const obj = JSON.parse(m[0])
+      if (obj.say !== undefined || obj.cmd !== undefined) return obj
+    } catch (_) {}
+  }
+  return { say: content.replace(/\s+/g, ' ').slice(0, 200), cmd: '' }
+}
+
 async function askGroq (username, text, state) {
   const system = 'Ты Minecraft-бот по имени ' + USERNAME + ' на ванильном сервере 1.21. Отвечай коротко по-русски (до 200 символов), дружелюбно. ' +
     'Если игрок просит что-то сделать, выбери одну команду из списка: ' + [...AI_COMMANDS].join(' ') + '. ' +
     '!копай принимает английское имя блока, например "!копай dirt". ' +
-    'Ответь строго JSON: {"say":"текст для чата","cmd":"команда или пустая строка"}. ' +
+    'Ответь строго JSON без пояснений: {"say":"текст для чата","cmd":"команда или пустая строка"}. ' +
     'Состояние бота: ' + state
   aiHistory.push({ role: 'user', content: `${username}: ${text}` })
   if (aiHistory.length > 10) aiHistory.splice(0, aiHistory.length - 10)
-  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${groqKey}` },
-    body: JSON.stringify({
-      model: GROQ_MODEL,
-      messages: [{ role: 'system', content: system }, ...aiHistory],
-      response_format: { type: 'json_object' },
-      temperature: 0.6,
-      max_tokens: 200
-    })
-  })
+  const messages = [{ role: 'system', content: system }, ...aiHistory]
+  let res = await groqChat(messages)
+  if (res.status === 404 || res.status === 400) {
+    // модель убрали или переименовали: берём доступную и пробуем ещё раз
+    console.log('Groq ответ:', res.status, (await res.text().catch(() => '')).slice(0, 300))
+    await pickModel()
+    res = await groqChat(messages)
+  }
   if (!res.ok) {
     aiHistory.pop()
-    const body = (await res.text().catch(() => '')).slice(0, 300)
-    console.log('Groq ответ:', res.status, body)
-    const err = new Error(`Groq ${res.status}`)
-    err.status = res.status
-    throw err
+    console.log('Groq ответ:', res.status, (await res.text().catch(() => '')).slice(0, 300))
+    throw Object.assign(new Error(`Groq ${res.status}`), { status: res.status })
   }
   const data = await res.json()
-  const content = data.choices?.[0]?.message?.content || '{}'
+  const content = data.choices?.[0]?.message?.content || ''
   aiHistory.push({ role: 'assistant', content })
-  try { return JSON.parse(content) } catch (_) { return { say: content.slice(0, 200), cmd: '' } }
+  return parseReply(content)
 }
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
