@@ -45,6 +45,8 @@ async function askGroq (username, text, state) {
   })
   if (!res.ok) {
     aiHistory.pop()
+    const body = (await res.text().catch(() => '')).slice(0, 300)
+    console.log('Groq ответ:', res.status, body)
     const err = new Error(`Groq ${res.status}`)
     err.status = res.status
     throw err
@@ -328,8 +330,8 @@ function start () {
       const cmd = String(out.cmd || '').trim()
       if (cmd && AI_COMMANDS.has(cmd.split(/\s+/)[0])) handle(username, cmd, whisper)
     } catch (err) {
-      console.log('Groq:', err.message)
-      say(err.status === 401 ? 'Ключ Groq не подошёл, пришли новый через !ключ' : 'Мозг временно не отвечает')
+      console.log('Groq:', err.message, err.cause?.message || '')
+      say(err.status === 401 ? 'Ключ Groq не подошёл, пришли новый через !ключ' : `Мозг не отвечает: ${err.message} ${err.cause?.code || ''}`.trim())
     }
     aiBusy = false
   }
