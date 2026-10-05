@@ -1,3 +1,5 @@
+const fs = require('fs')
+const path = require('path')
 const mineflayer = require('mineflayer')
 const { pathfinder, Movements, goals } = require('mineflayer-pathfinder')
 
@@ -7,10 +9,52 @@ const VERSION = process.env.MC_VERSION || '1.21.11'
 const USERNAME = process.env.MC_USER || 'poop173'
 const OWNER = process.env.MC_OWNER || '' // пусто = слушаться всех
 
-const HELP = '!иди !следуй !руби !копай [блок] !стой !защита !дом !домой !спи !инв !дай <предмет> [кол] !где'
+const KEY_FILE = path.join(__dirname, '.groq_key')
+const GROQ_MODEL = process.env.GROQ_MODEL || 'llama-3.3-70b-versatile'
+const AI_COMMANDS = new Set(['!иди', '!следуй', '!руби', '!копай', '!стой', '!защита', '!дом', '!домой', '!спи', '!инв', '!где'])
+
+const HELP = '!ключ <groq> !иди !следуй !руби !копай [блок] !стой !защита !дом !домой !спи !инв !дай <предмет> [кол] !где'
 const BAD_FOOD = new Set(['rotten_flesh', 'spider_eye', 'poisonous_potato', 'pufferfish', 'chorus_fruit', 'suspicious_stew'])
 const ARMOR_RANK = { leather: 1, golden: 2, chainmail: 3, iron: 4, diamond: 5, netherite: 6 }
 const ARMOR_SLOT = { helmet: 'head', chestplate: 'torso', leggings: 'legs', boots: 'feet' }
+
+// ключ Groq живёт между переподключениями; лежит в env или в файле .groq_key
+let groqKey = process.env.GROQ_API_KEY || ''
+try { if (!groqKey) groqKey = fs.readFileSync(KEY_FILE, 'utf8').trim() } catch (_) {}
+const aiHistory = []
+let aiBusy = false
+
+async function askGroq (username, text, state) {
+  const system = 'Ты Minecraft-бот по имени ' + USERNAME + ' на ванильном сервере 1.21. Отвечай коротко по-русски (до 200 символов), дружелюбно. ' +
+    'Если игрок просит что-то сделать, выбери одну команду из списка: ' + [...AI_COMMANDS].join(' ') + '. ' +
+    '!копай принимает английское имя блока, например "!копай dirt". ' +
+    'Ответь строго JSON: {"say":"текст для чата","cmd":"команда или пустая строка"}. ' +
+    'Состояние бота: ' + state
+  aiHistory.push({ role: 'user', content: `${username}: ${text}` })
+  if (aiHistory.length > 10) aiHistory.splice(0, aiHistory.length - 10)
+  const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${groqKey}` },
+    body: JSON.stringify({
+      model: GROQ_MODEL,
+      messages: [{ role: 'system', content: system }, ...aiHistory],
+      response_format: { type: 'json_object' },
+      temperature: 0.6,
+      max_tokens: 200
+    })
+  })
+  if (!res.ok) {
+    aiHistory.pop()
+    const err = new Error(`Groq ${res.status}`)
+    err.status = res.status
+    throw err
+  }
+  const data = await res.json()
+  const content = data.choices?.[0]?.message?.content || '{}'
+  aiHistory.push({ role: 'assistant', content })
+  try { return JSON.parse(content) } catch (_) { return { say: content.slice(0, 200), cmd: '' } }
+}
+
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms))
 
 function start () {
@@ -190,7 +234,7 @@ function start () {
 
   // ---------- команды ----------
 
-  function handle (username, message) {
+  function handle (username, message, whisper = false) {
     const [cmd, ...args] = message.trim().split(/\s+/)
     const player = bot.players[username]?.entity
     switch (cmd) {
@@ -258,7 +302,44 @@ function start () {
       case '!помощь':
         bot.chat(HELP)
         break
+      case '!ключ': {
+        const key = args[0]
+        if (!key) return bot.chat('Напиши: !ключ <твой ключ Groq>. Лучше шёпотом: /msg ' + bot.username + ' !ключ ...')
+        if (!/^gsk_[A-Za-z0-9]{20,}$/.test(key)) return bot.whisper(username, 'Это не похоже на ключ Groq (должен начинаться с gsk_)')
+        groqKey = key
+        try { fs.writeFileSync(KEY_FILE, key, { mode: 0o600 }) } catch (err) { console.log('Не смог сохранить ключ:', err.message) }
+        bot.whisper(username, 'Ключ принят, теперь я умею общаться. Пиши мне "бот, ..." или шепчи в личку.')
+        if (!whisper) bot.whisper(username, 'Ключ виден всем в чате! Лучше создай новый на сайте Groq и передавай шёпотом.')
+        break
+      }
     }
+  }
+
+  async function aiReply (username, text, whisper) {
+    const say = (msg) => (whisper ? bot.whisper(username, msg) : bot.chat(msg))
+    if (!groqKey) return say('Нет ключа Groq. Напиши !ключ <ключ>')
+    if (aiBusy) return
+    aiBusy = true
+    try {
+      const p = bot.entity.position
+      const state = `здоровье ${Math.round(bot.health)}, еда ${bot.food}, позиция ${Math.floor(p.x)} ${Math.floor(p.y)} ${Math.floor(p.z)}`
+      const out = await askGroq(username, text, state)
+      if (out.say) say(String(out.say).slice(0, 220))
+      const cmd = String(out.cmd || '').trim()
+      if (cmd && AI_COMMANDS.has(cmd.split(/\s+/)[0])) handle(username, cmd, whisper)
+    } catch (err) {
+      console.log('Groq:', err.message)
+      say(err.status === 401 ? 'Ключ Groq не подошёл, пришли новый через !ключ' : 'Мозг временно не отвечает')
+    }
+    aiBusy = false
+  }
+
+  function onMessage (username, message, whisper) {
+    if (username === bot.username) return
+    if (OWNER && username !== OWNER) return
+    if (message.startsWith('!')) return handle(username, message, whisper)
+    const lower = message.toLowerCase()
+    if (whisper || lower.startsWith('бот') || lower.includes(bot.username.toLowerCase())) aiReply(username, message, whisper)
   }
 
   // ---------- события ----------
@@ -277,11 +358,8 @@ function start () {
     if (player.username !== bot.username) bot.chat(`привет, ${player.username}! Команды: !помощь`)
   })
 
-  bot.on('chat', (username, message) => {
-    if (username === bot.username) return
-    if (OWNER && username !== OWNER) return
-    handle(username, message)
-  })
+  bot.on('chat', (username, message) => onMessage(username, message, false))
+  bot.on('whisper', (username, message) => onMessage(username, message, true))
 
   bot.on('health', () => autoEat())
   bot.on('playerCollect', (collector) => {
